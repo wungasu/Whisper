@@ -48,13 +48,19 @@ def run_asr_pipeline(
         ),
     ).to_list()
 
-    subtitle_str, file_paths = whisper_inferencer.transcribe_file(
+    raw_text, subtitle_str, file_paths = whisper_inferencer.transcribe_file(
         [audio_path],
         None,
         None,
         None,
         "SRT",
         False,
+        False,
+        False,
+        None,
+        4,
+        0.85,
+        3,
         gr.Progress(),
         *hparams,
     )
@@ -62,7 +68,7 @@ def run_asr_pipeline(
     assert calculate_wer(answer, subtitle[2].strip().replace(",", "").replace(".", "")) < 0.1
 
     if not is_pytube_detected_bot():
-        subtitle_str, file_path = whisper_inferencer.transcribe_youtube(
+    subtitle_str, file_path = whisper_inferencer.transcribe_youtube(
             TEST_YOUTUBE_URL,
             "SRT",
             False,

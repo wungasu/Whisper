@@ -437,11 +437,6 @@ class WhisperParams(BaseParams):
                 step=0.01,
                 info="Temperature threshold for resetting prompt"
             ),
-            gr.Textbox(
-                label="Initial Prompt",
-                value=defaults.get("initial_prompt", GRADIO_NONE_STR),
-                info="Initial prompt for first window"
-            ),
             gr.Slider(
                 label="Temperature",
                 value=defaults.get("temperature", cls.__fields__["temperature"].default),

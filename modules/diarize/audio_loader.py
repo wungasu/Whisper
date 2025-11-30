@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import shutil
 from functools import lru_cache
 from typing import Optional, Union
 from scipy.io.wavfile import write
@@ -57,8 +58,13 @@ def load_audio(file: Union[str, np.ndarray], sr: int = SAMPLE_RATE) -> np.ndarra
         temp_file_path = file
 
     try:
+        # Resolve ffmpeg executable path robustly:
+        # 1) Use env FFMPEG_PATH if provided
+        # 2) Else try to locate via PATH using shutil.which
+        # 3) Else fallback to plain "ffmpeg" (may fail if not in PATH)
+        ffmpeg_bin = os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg") or "ffmpeg"
         cmd = [
-            "ffmpeg",
+            ffmpeg_bin,
             "-nostdin",
             "-threads",
             "0",

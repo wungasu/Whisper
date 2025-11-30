@@ -16,6 +16,8 @@ TRANSLATION_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "translations")
 UVR_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "UVR")
 UVR_INSTRUMENTAL_OUTPUT_DIR = os.path.join(UVR_OUTPUT_DIR, "instrumental")
 UVR_VOCALS_OUTPUT_DIR = os.path.join(UVR_OUTPUT_DIR, "vocals")
+KNOWLEDGE_BASE_DIR = os.path.join(WEBUI_DIR, "knowledge_base")
+RAG_STORE_DIR = os.path.join(OUTPUT_DIR, "rag_store")
 BACKEND_DIR_PATH = os.path.join(WEBUI_DIR, "backend")
 SERVER_CONFIG_PATH = os.path.join(BACKEND_DIR_PATH, "configs", "config.yaml")
 SERVER_DOTENV_PATH = os.path.join(BACKEND_DIR_PATH, "configs", ".env")
@@ -33,5 +35,7 @@ for dir_path in [MODELS_DIR,
                  TRANSLATION_OUTPUT_DIR,
                  UVR_INSTRUMENTAL_OUTPUT_DIR,
                  UVR_VOCALS_OUTPUT_DIR,
-                 BACKEND_CACHE_DIR]:
+                 BACKEND_CACHE_DIR,
+                 KNOWLEDGE_BASE_DIR,
+                 RAG_STORE_DIR]:
     os.makedirs(dir_path, exist_ok=True)

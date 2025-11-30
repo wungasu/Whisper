@@ -37,6 +37,36 @@ CSS = """
 }
 """
 
+# JavaScript helper to sanitize anchor hrefs and prevent Invalid URL errors
+POSTMESSAGE_FIX_JS = """
+<script>
+(function () {
+    function sanitizeAnchors() {
+        var anchors = document.querySelectorAll('a');
+        anchors.forEach(function (anchor) {
+            var href = anchor.getAttribute('href');
+            if (!href) {
+                return;
+            }
+            try {
+                new URL(href, window.location.href);
+            } catch (err) {
+                console.warn('[Gradio Anchor Fix] Invalid href detected, replacing with "#":', href);
+                anchor.setAttribute('href', '#');
+            }
+        });
+    }
+
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        sanitizeAnchors();
+    } else {
+        document.addEventListener('DOMContentLoaded', sanitizeAnchors);
+    }
+    window.addEventListener('gradio_app_ready', sanitizeAnchors);
+})();
+</script>
+"""
+
 MARKDOWN = """
 ### [Whisper-WebUI](https://github.com/jhj0517/Whsiper-WebUI)
 """

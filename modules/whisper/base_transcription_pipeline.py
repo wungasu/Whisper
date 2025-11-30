@@ -4,13 +4,14 @@ import ctranslate2
 import gradio as gr
 import torchaudio
 from abc import ABC, abstractmethod
-from typing import BinaryIO, Union, Tuple, List, Callable
+from typing import BinaryIO, Union, Tuple, List, Callable, TYPE_CHECKING, Optional, Dict, Any
 import numpy as np
 from datetime import datetime
 from faster_whisper.vad import VadOptions
 import gc
 from copy import deepcopy
 import time
+from uuid import uuid4
 
 from modules.uvr.music_separator import MusicSeparator
 from modules.utils.paths import (WHISPER_MODELS_DIR, DIARIZATION_MODELS_DIR, OUTPUT_DIR, DEFAULT_PARAMETERS_CONFIG_PATH,
@@ -24,6 +25,9 @@ from modules.utils.audio_manager import validate_audio
 from modules.whisper.data_classes import *
 from modules.diarize.diarizer import Diarizer
 from modules.vad.silero_vad import SileroVAD
+
+if TYPE_CHECKING:
+    from modules.rag.text_corrector import TextCorrectionRAG
 
 
 logger = get_logger()
@@ -56,6 +60,10 @@ class BaseTranscriptionPipeline(ABC):
         self.device = self.get_device()
         self.available_compute_types = self.get_available_compute_type()
         self.current_compute_type = self.get_compute_type()
+        self.text_corrector: Optional["TextCorrectionRAG"] = None
+
+    def register_text_corrector(self, corrector: "TextCorrectionRAG"):
+        self.text_corrector = corrector
 
     @abstractmethod
     def transcribe(self,
@@ -220,9 +228,16 @@ class BaseTranscriptionPipeline(ABC):
                         save_same_dir: Optional[str] = None,
                         file_format: str = "SRT",
                         add_timestamp: bool = True,
+                        convert_t2s: bool = False,
+                        enable_llm_correction: bool = True,
+                        rag_kb_dir: Optional[str] = None,
+                        ollama_base_url: Optional[str] = None,
+                        ollama_model: str = "qwen2.5:3b",
+                        rag_top_k: int = 4,
+                        rag_similarity: float = 0.85,
                         progress=gr.Progress(),
                         *pipeline_params,
-                        ) -> Tuple[str, List]:
+                        ) -> Tuple[str, str, List, Optional[Dict[str, Any]]]:
         """
         Write subtitle file from Files
 
@@ -243,6 +258,20 @@ class BaseTranscriptionPipeline(ABC):
             Subtitle File format to write from gr.Dropdown(). Supported format: [SRT, WebVTT, txt]
         add_timestamp: bool
             Boolean value from gr.Checkbox() that determines whether to add a timestamp at the end of the subtitle filename.
+        convert_t2s: bool
+            Whether to convert Traditional Chinese to Simplified Chinese.
+        enable_llm_correction: bool
+            Enable Ollama LLM-based text correction using RAG knowledge base.
+        rag_kb_dir: Optional[str]
+            Directory containing txt files for the RAG knowledge base.
+        ollama_base_url: Optional[str]
+            Ollama service base URL (default: http://localhost:11434).
+        ollama_model: str
+            Ollama model name (default: qwen2.5:3b).
+        rag_top_k: int
+            Number of retrieved knowledge chunks for LLM correction reference.
+        rag_similarity: float
+            Minimum similarity threshold (0~1) for knowledge retrieval.
         progress: gr.Progress
             Indicator to show progress directly in gradio.
         *pipeline_params: tuple
@@ -250,8 +279,10 @@ class BaseTranscriptionPipeline(ABC):
 
         Returns
         ----------
-        result_str:
-            Result of transcription to return to gr.Textbox()
+        whisper_raw_text:
+            Raw Whisper transcription text (without LLM correction) for display.
+        corrected_text:
+            Final transcription text after optional LLM correction (displayed to the user).
         result_file_path:
             Output file path to return to gr.Files()
         """
@@ -261,6 +292,13 @@ class BaseTranscriptionPipeline(ABC):
                 "highlight_words": True if params.whisper.word_timestamps else False
             }
 
+            # Lazy import to avoid hard dependency if not used
+            if convert_t2s:
+                try:
+                    from modules.utils.zh_convert import convert_segments_to_simplified
+                except Exception:
+                    convert_t2s = False  # fallback if converter unavailable
+
             if input_folder_path:
                 files = get_media_files(input_folder_path, include_sub_directory=include_subdirectory)
             if isinstance(files, str):
@@ -268,7 +306,7 @@ class BaseTranscriptionPipeline(ABC):
             if files and isinstance(files[0], gr.utils.NamedString):
                 files = [file.name for file in files]
 
-            files_info = {}
+            files_info: Dict[str, Dict[str, Any]] = {}
             for file in files:
                 transcribed_segments, time_for_task = self.run(
                     file,
@@ -278,8 +316,47 @@ class BaseTranscriptionPipeline(ABC):
                     None,
                     *pipeline_params,
                 )
+                raw_segments = [seg.model_copy(deep=True) for seg in transcribed_segments] if transcribed_segments else []
 
                 file_name, file_ext = os.path.splitext(os.path.basename(file))
+                rag_records = []
+
+                # Post-process
+                raw_text_display = self._segments_to_display_text(raw_segments)
+
+                if transcribed_segments:
+
+                    if convert_t2s:
+                        transcribed_segments = convert_segments_to_simplified(transcribed_segments)
+
+                    if enable_llm_correction:
+                        if self.text_corrector is None:
+                            logger.warning("启用了 Ollama LLM 纠错，但 TextCorrectionRAG 尚未初始化。")
+                        else:
+                            try:
+                                # 处理空字符串，转换为 None
+                                base_url = ollama_base_url if ollama_base_url and ollama_base_url.strip() else "http://localhost:11434"
+                                # 使用 Ollama LLM 进行智能纠错
+                                transcribed_segments, rag_records = self.text_corrector.correct_segments_with_llm(
+                                    transcribed_segments,
+                                    knowledge_dir=rag_kb_dir,
+                                    llm_api_type="ollama",
+                                    llm_api_key=None,
+                                    llm_base_url=base_url,
+                                    llm_model=ollama_model,
+                                    top_k=int(max(1, rag_top_k)),
+                                    similarity_threshold=float(max(0.0, min(1.0, rag_similarity))),
+                                )
+                                if rag_records:
+                                    logger.info(
+                                        "Ollama LLM 纠错已应用 %d 处修改，示例：%s -> %s",
+                                        len(rag_records),
+                                        rag_records[0].original,
+                                        rag_records[0].corrected
+                                    )
+                            except Exception as rag_err:
+                                logger.error(f"Ollama LLM 纠错失败: {rag_err}", exc_info=True)
+
                 if save_same_dir and input_folder_path:
                     output_dir = os.path.dirname(file)
                     subtitle, file_path = generate_file(
@@ -299,20 +376,61 @@ class BaseTranscriptionPipeline(ABC):
                     add_timestamp=add_timestamp,
                     **writer_options
                 )
-                files_info[file_name] = {"subtitle": read_file(file_path), "time_for_task": time_for_task, "path": file_path}
+                files_info[file_name] = {
+                    "subtitle": read_file(file_path),
+                    "time_for_task": time_for_task,
+                    "path": file_path,
+                    "rag_records": rag_records,
+                    "raw_text": raw_text_display
+                }
 
-            total_result = ''
+            chat_payload: Optional[Dict[str, Any]] = None
+            if files_info:
+                combined_texts: List[str] = []
+                file_entries: List[Dict[str, Any]] = []
+                for file_name, info in files_info.items():
+                    file_text = info.get("subtitle") or ""
+                    file_entries.append(
+                        {
+                            "name": file_name,
+                            "text": file_text,
+                            "rag_records": info.get("rag_records", []),
+                        }
+                    )
+                    if file_text:
+                        combined_texts.append(f"### {file_name}\n{file_text}")
+
+                chat_payload = {
+                    "session_id": str(uuid4()),
+                    "created_at": time.time(),
+                    "files": file_entries,
+                    "combined_text": "\n\n".join(combined_texts).strip(),
+                }
+
+            total_whisper_text = ''
+            total_corrected_text = ''
             total_time = 0
             for file_name, info in files_info.items():
-                total_result += '------------------------------------\n'
-                total_result += f'{file_name}\n\n'
-                total_result += f'{info["subtitle"]}'
+                total_whisper_text += '------------------------------------\n'
+                total_whisper_text += f'{file_name}\n\n'
+                total_whisper_text += f'{info.get("raw_text", "") or "（无可用文本）"}\n'
+
+                corrected_body = info["subtitle"]
+
+                total_corrected_text += '------------------------------------\n'
+                total_corrected_text += f'{file_name}\n\n'
+                total_corrected_text += corrected_body
                 total_time += info["time_for_task"]
 
-            result_str = f"Done in {self.format_time(total_time)}! Subtitle is in the outputs folder.\n\n{total_result}"
+            whisper_result = total_whisper_text.strip() or "Whisper 未生成有效文本。"
+            corrected_result = total_corrected_text.strip()
+            corrected_result = (
+                f"Done in {self.format_time(total_time)}! Subtitle is in the outputs folder.\n\n{corrected_result}"
+                if corrected_result else "未生成纠错文本。"
+            )
             result_file_path = [info['path'] for info in files_info.values()]
 
-            return result_str, result_file_path
+            return whisper_result, corrected_result, result_file_path, chat_payload
 
         except Exception as e:
             raise RuntimeError(f"Error transcribing file: {e}") from e
@@ -560,8 +678,7 @@ class BaseTranscriptionPipeline(ABC):
             language_code_dict = {value: key for key, value in whisper.tokenizer.LANGUAGES.items()}
             params.whisper.lang = language_code_dict[params.whisper.lang]
 
-        if params.whisper.initial_prompt == GRADIO_NONE_STR:
-            params.whisper.initial_prompt = None
+        params.whisper.initial_prompt = None
         if params.whisper.prefix == GRADIO_NONE_STR:
             params.whisper.prefix = None
         if params.whisper.hotwords == GRADIO_NONE_STR:
@@ -620,3 +737,24 @@ class BaseTranscriptionPipeline(ABC):
         resampler = torchaudio.transforms.Resample(orig_freq=original_sample_rate, new_freq=new_sample_rate)
         resampled_audio = resampler(audio).numpy()
         return resampled_audio
+
+    @staticmethod
+    def _segments_to_display_text(segments: List[Segment]) -> str:
+        if not segments:
+            return ""
+
+        lines = []
+        for idx, seg in enumerate(segments, 1):
+            if not seg or not seg.text:
+                continue
+            start = seg.start if seg.start is not None else 0.0
+            end = seg.end if seg.end is not None else start
+            start_str = format_timestamp(start)
+            end_str = format_timestamp(end)
+            lines.extend([
+                str(idx),
+                f"{start_str} --> {end_str}",
+                seg.text.strip(),
+                ""
+            ])
+        return "\n".join(lines).strip()

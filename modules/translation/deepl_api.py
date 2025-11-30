@@ -180,6 +180,10 @@ class DeepLAPI:
                                 target_lang: str,
                                 is_pro: bool = False):
         """Request API response to DeepL server"""
+        # 处理字符串形式的 AUTOMATIC_DETECTION
+        if isinstance(source_lang, str) and source_lang == AUTOMATIC_DETECTION.unwrap():
+            source_lang = AUTOMATIC_DETECTION
+        
         if source_lang not in list(DEEPL_AVAILABLE_SOURCE_LANGS.keys()):
             raise ValueError(f"Source language {source_lang} is not supported."
                              f"Use one of {list(DEEPL_AVAILABLE_SOURCE_LANGS.keys())}")
